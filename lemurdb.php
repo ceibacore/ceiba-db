@@ -81,6 +81,25 @@ class LemurDB
     }
 
     /**
+     * Manually set the LemurDB singleton instance with an existing PDO connection or a callable that resolves to one.
+     * Useful for running unit tests on shared SQLite in-memory connections.
+     */
+    public static function setInstance(\PDO|callable $pdo, array $config = []): void
+    {
+        $db = new self(array_merge([
+            'driver'   => 'sqlite',
+            'host'     => 'localhost',
+            'port'     => 3306,
+            'db'       => ':memory:',
+            'username' => '',
+            'password' => '',
+            'prefix'   => 'ase_',
+        ], $config));
+        $db->pdo = $pdo;
+        self::$instance = $db;
+    }
+
+    /**
      * Build a PDO DSN string from config.
      *
      * @param array $c Connection configuration.
@@ -102,7 +121,7 @@ class LemurDB
      */
     public function query(string $table): LemurQuery
     {
-        return new LemurQuery($this->pdo, $table, $this->getPrefix());
+        return new LemurQuery($this->pdo(), $table, $this->getPrefix());
     }
 
     /**
@@ -133,13 +152,14 @@ class LemurDB
      */
     public function transaction(callable $callback): mixed
     {
-        $this->pdo->beginTransaction();
+        $pdo = $this->pdo();
+        $pdo->beginTransaction();
         try {
             $result = $callback($this);
-            $this->pdo->commit();
+            $pdo->commit();
             return $result;
         } catch (\Throwable $e) {
-            $this->pdo->rollBack();
+            $pdo->rollBack();
             throw $e;
         }
     }
@@ -154,6 +174,13 @@ class LemurDB
      */
     public function pdo(): PDO
     {
+        if (is_callable($this->pdo)) {
+            $resolved = ($this->pdo)();
+            if (!$resolved instanceof \PDO) {
+                throw new \RuntimeException("PDO resolver did not return a PDO instance.");
+            }
+            return $resolved;
+        }
         return $this->pdo;
     }
 }
