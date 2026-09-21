@@ -15,7 +15,7 @@
     },
     "autoload": {
         "files": [
-            "lemurdb.php"
+            "ceibadb.php"
         ]
     },
     "require-dev": {

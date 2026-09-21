@@ -3,14 +3,16 @@
 namespace CeibaDB\Tests;
 
 use PHPUnit\Framework\TestCase;
-use LemurDB;
 use CeibaDB;
+use CeibaQuery;
+use LemurDB;
+use LemurQuery;
 use PDO;
 
 class CeibaDbTest extends TestCase
 {
     private PDO $pdo;
-    private LemurDB $db;
+    private CeibaDB $db;
 
     protected function setUp(): void
     {
@@ -25,16 +27,18 @@ class CeibaDbTest extends TestCase
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )");
 
-        LemurDB::setInstance($this->pdo, ['prefix' => '']);
-        $this->db = LemurDB::getInstance();
+        CeibaDB::setInstance($this->pdo, ['prefix' => '']);
+        $this->db = CeibaDB::getInstance();
     }
 
     public function test_singleton_and_aliases(): void
     {
-        $this->assertInstanceOf(LemurDB::class, $this->db);
+        $this->assertInstanceOf(CeibaDB::class, $this->db);
         $this->assertTrue(class_exists('CeibaDB'));
         $this->assertTrue(class_exists('CeibaQuery'));
-        $this->assertSame(LemurDB::getInstance(), CeibaDB::getInstance());
+        $this->assertTrue(class_exists('LemurDB'));
+        $this->assertTrue(class_exists('LemurQuery'));
+        $this->assertSame(CeibaDB::getInstance(), LemurDB::getInstance());
     }
 
     public function test_insert_and_get(): void
@@ -62,5 +66,11 @@ class CeibaDbTest extends TestCase
         $this->assertStringContainsString('SELECT id, name, email FROM `users`', $sql);
         $this->assertStringContainsString('WHERE `status` = ?', $sql);
         $this->assertStringContainsString('LIMIT 0, 10', $sql);
+    }
+
+    public function test_backward_compatibility_lemurdb(): void
+    {
+        $rows = LemurDB::getInstance()->query('users')->get();
+        $this->assertIsArray($rows);
     }
 }

@@ -1,236 +1,92 @@
-# LemurDB
+# CeibaDB
 
-A minimal, lightweight PHP database wrapper that exposes a fluent query builder backed by PDO.
+[![Packagist Version](https://img.shields.io/packagist/v/ceibacore/ceiba-db.svg)](https://packagist.org/packages/ceibacore/ceiba-db)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
----
+A lightweight, zero-dependency, PDO-backed database abstraction layer and fluent query builder for PHP 8.1+.
 
-## Requirements
-
-- PHP 8.x
-- PDO extension enabled
-- A supported PDO driver (e.g., `pdo_mysql`, `pdo_pgsql`)
+Designed for maximum developer ergonomics without the overhead of heavy ORMs. Supports MySQL, MariaDB, PostgreSQL, and SQLite.
 
 ---
 
 ## Installation
 
-Copy `LemurDB.php` into your project and require it:
-
-```php
-require_once 'LemurDB.php';
+```bash
+composer require ceibacore/ceiba-db
 ```
 
 ---
 
-## Getting Started
+## Quick Start
 
-LemurDB uses a **Singleton pattern** — the connection is created once and reused across your application.
+### 1. Initialize Connection (Singleton)
 
 ```php
-$db = LemurDB::getInstance([
+use CeibaDB;
+
+// Configure singleton instance
+$db = CeibaDB::getInstance([
     'driver'   => 'mysql',
-    'host'     => 'localhost',
+    'host'     => '127.0.0.1',
     'port'     => 3306,
     'db'       => 'my_database',
-    'username' => 'root',
+    'username' => 'db_user',
     'password' => 'secret',
-    'prefix'   => 'app_',   // optional table prefix
+    'charset'  => 'utf8mb4',
+    'prefix'   => 'cb_', // optional table prefix
 ]);
 ```
 
-> ⚠️ Pass the config only on the **first** call. Subsequent `getInstance()` calls return the existing connection.
-
----
-
-## Query Builder — `LemurQuery`
-
-All queries start with `$db->query('table_name')`, which returns a chainable `LemurQuery` instance.
-
-### `select()`
+### 2. Query Builder (`CeibaQuery`)
 
 ```php
-// Select all columns (default)
-$db->query('users')->select()->get();
-
-// Select specific columns
-$db->query('users')->select(['id', 'name', 'email'])->get();
-
-// Raw select string
-$db->query('users')->select('id, name, email')->get();
-```
-
----
-
-### `where()` / `orWhere()`
-
-```php
-// Single AND condition
-$db->query('users')
-    ->where(['status' => 'active'])
-    ->get();
-
-// Multiple AND conditions
-$db->query('users')
-    ->where(['status' => 'active', 'role' => 'admin'])
-    ->get();
-
-// OR condition
-$db->query('users')
-    ->where(['status' => 'active'])
-    ->orWhere(['status' => 'pending'])
-    ->get();
-```
-
----
-
-### `like()` / `orLike()`
-
-```php
-// AND LIKE
-$db->query('products')
-    ->like('name', '%cable%')
-    ->get();
-
-// OR LIKE
-$db->query('products')
-    ->like('name', '%cable%')
-    ->orLike('description', '%cable%')
-    ->get();
-```
-
----
-
-### `between()` / `orBetween()`
-
-```php
-// AND BETWEEN
-$db->query('orders')
-    ->between('total', 100, 500)
-    ->get();
-
-// OR BETWEEN
-$db->query('orders')
-    ->between('total', 100, 500)
-    ->orBetween('total', 1000, 2000)
-    ->get();
-```
-
----
-
-### `orderby()`
-
-```php
-$db->query('users')
+// SELECT
+$users = $db->query('users')
+    ->select(['id', 'name', 'email'])
+    ->where(['status' => 1])
     ->orderby('created_at DESC')
+    ->limit(20)
     ->get();
+
+// INSERT
+$userId = $db->query('users')->insert([
+    'name'  => 'Jane Doe',
+    'email' => 'jane@example.com',
+]);
+
+// UPDATE (requires at least one WHERE condition for safety)
+$affected = $db->query('users')
+    ->where(['id' => $userId])
+    ->update(['name' => 'Jane Smith']);
+
+// DELETE (requires at least one WHERE condition for safety)
+$deleted = $db->query('users')
+    ->where(['id' => $userId])
+    ->delete();
 ```
 
----
-
-### `limit()`
+### 3. Transactions
 
 ```php
-// First 10 rows
-$db->query('users')->limit(10)->get();
-
-// Rows 21–30 (pagination: offset 20, limit 10)
-$db->query('users')->limit(10, 20)->get();
+$db->transaction(function (CeibaDB $db) {
+    $db->query('accounts')->where(['id' => 1])->decrement('balance', 100);
+    $db->query('accounts')->where(['id' => 2])->increment('balance', 100);
+});
 ```
 
 ---
 
-## Chaining Example
+## Backward Compatibility
+
+CeibaDB includes 100% backward compatibility aliases for `LemurDB` and `LemurQuery`:
 
 ```php
-$results = $db->query('products')
-    ->select(['id', 'name', 'price'])
-    ->where(['status' => 'active'])
-    ->like('name', '%usb%')
-    ->between('price', 5, 100)
-    ->orderby('price ASC')
-    ->limit(20, 0)
-    ->get();
+// Existing code using LemurDB continues to work transparently:
+$db = LemurDB::getInstance();
 ```
-
----
-
-## Debugging — `toSql()` and `getParams()`
-
-Inspect the generated SQL and bound parameters before execution:
-
-```php
-$query = $db->query('users')
-    ->select(['id', 'name'])
-    ->where(['status' => 'active'])
-    ->limit(5);
-
-echo $query->toSql();
-// SELECT id, name FROM app_users WHERE status = ? LIMIT 0, 5
-
-print_r($query->getParams());
-// Array ( [0] => active )
-```
-
----
-
-## Table Prefix
-
-If a `prefix` is set in the config, it is automatically prepended to all table names:
-
-```php
-// Config: 'prefix' => 'app_'
-$db->query('users');
-// Queries the table: app_users
-```
-
----
-
-## PDO Configuration
-
-LemurDB configures PDO with these defaults out of the box:
-
-| Option | Value |
-|---|---|
-| Error mode | `ERRMODE_EXCEPTION` |
-| Fetch mode | `FETCH_ASSOC` |
-| Emulate prepares | `false` (native prepared statements) |
-| Charset | `utf8mb4` |
-
----
-
-## Architecture
-
-```
-LemurDB  (Singleton)
-  └─► LemurQuery  (Fluent builder)
-        ├─ select()
-        ├─ where() / orWhere()
-        ├─ like()  / orLike()
-        ├─ between() / orBetween()
-        ├─ orderby()
-        ├─ limit()
-        ├─ get()       ← executes and returns results
-        ├─ toSql()     ← returns SQL string (debug)
-        └─ getParams() ← returns bound params (debug)
-```
-
----
-
-## Security
-
-- All user-supplied values are **bound as parameters** via PDO prepared statements — SQL injection is not possible through the query builder API.
-- Native prepared statements are enforced (`ATTR_EMULATE_PREPARES => false`).
-
----
-
-## Limitations
-
-- **SELECT only** — INSERT, UPDATE, and DELETE are not implemented in this version.
-- **No JOIN support** — the `joins` clause is reserved in the builder but not exposed via a public method yet.
-- Only tested with **MySQL/MariaDB**. PostgreSQL and SQLite may require DSN adjustments.
 
 ---
 
 ## License
 
-MIT
+MIT License. See [LICENSE](LICENSE) for details.
