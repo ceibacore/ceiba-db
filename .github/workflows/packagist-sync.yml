@@ -1,0 +1,48 @@
+name: Packagist Sync & CI
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*.*.*' ]
+  release:
+    types: [ published ]
+
+jobs:
+  validate:
+    name: Validate Composer & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, pdo, pdo_sqlite, json
+          coverage: none
+
+      - name: Validate composer.json
+        run: composer validate --strict
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress
+
+      - name: Run Tests
+        run: vendor/bin/phpunit
+
+  sync-packagist:
+    name: Notify Packagist
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'ceibacore' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    steps:
+      - name: Trigger Packagist Update
+        if: ${{ env.PACKAGIST_USER != '' && env.PACKAGIST_TOKEN != '' }}
+        env:
+          PACKAGIST_USER: ${{ secrets.PACKAGIST_USERNAME }}
+          PACKAGIST_TOKEN: ${{ secrets.PACKAGIST_API_TOKEN }}
+        run: |
+          curl -s -f -XPOST -H "Content-Type: application/json" \
+            "https://packagist.org/api/update-package?username=${PACKAGIST_USER}&apiToken=${PACKAGIST_TOKEN}" \
+            -d "{\"repository\":{\"url\":\"https://github.com/${{ github.repository }}\"}}" || true

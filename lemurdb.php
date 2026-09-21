@@ -863,3 +863,11 @@ if (!class_exists('LemurQuery')) {
         }
     }
 }
+
+// ── Backward & Forward Compatibility Aliases ──────────────────────────────
+if (!class_exists('CeibaDB', false)) {
+    class_alias('LemurDB', 'CeibaDB');
+}
+if (!class_exists('CeibaQuery', false)) {
+    class_alias('LemurQuery', 'CeibaQuery');
+}
