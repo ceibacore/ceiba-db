@@ -140,3 +140,5 @@ dist
 
 .phpunit.result.cache
 
+.ia/
+.agents/
