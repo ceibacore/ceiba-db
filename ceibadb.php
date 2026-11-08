@@ -9,7 +9,7 @@
 if (!class_exists('CeibaDB')) {
     class CeibaDB
     {
-        public const VERSION = '1.1.0';
+        public const VERSION = '1.2.0';
 
         /** Accepted driver names => PDO driver. */
         private const DRIVERS = [
@@ -33,6 +33,9 @@ if (!class_exists('CeibaDB')) {
 
         /** @var list<callable(array): void> */
         private static array $listeners = [];
+
+        /** @var (callable(array): PDO)|null Supplies the connection for every new instance. */
+        private static $pdoResolver = null;
 
         /** @var PDO|callable|null */
         private $pdo;
@@ -138,7 +141,10 @@ if (!class_exists('CeibaDB')) {
 
             $key = self::configKey($config);
             if (!isset(self::$instances[$key])) {
-                $db = new self($config);
+                $resolver = self::$pdoResolver;
+                $db = $resolver === null
+                    ? new self($config)
+                    : new self($config, static fn (): PDO => $resolver($config));
                 self::$instances[$key] = $db;
                 if (self::$instance === null) {
                     self::$instance = $db;
@@ -177,12 +183,38 @@ if (!class_exists('CeibaDB')) {
             }
         }
 
-        /** Clears every cached instance, the default instance and the mock flag. */
+        /**
+         * Makes every instance created from now on use the PDO returned by $resolver
+         * instead of opening its own connection, while keeping its own configuration
+         * (prefix, driver). The resolver receives that configuration and runs on each
+         * pdo() call, so it can follow a host connection that is replaced (a framework
+         * test connection, a reconnect). Cached instances are dropped so they rebind.
+         * Pass null to go back to dedicated connections.
+         *
+         * @param (callable(array): PDO)|null $resolver
+         */
+        public static function usePdoResolver(?callable $resolver): void
+        {
+            self::$pdoResolver = $resolver;
+            self::$instances = [];
+            if (!self::$isMocked) {
+                self::$instance = null;
+            }
+        }
+
+        /** True while usePdoResolver() supplies connections. */
+        public static function hasPdoResolver(): bool
+        {
+            return self::$pdoResolver !== null;
+        }
+
+        /** Clears every cached instance, the default instance, the mock flag and the PDO resolver. */
         public static function resetInstances(): void
         {
             self::$instances = [];
             self::$instance = null;
             self::$isMocked = false;
+            self::$pdoResolver = null;
         }
 
         /** Number of cached connections (operational visibility). */

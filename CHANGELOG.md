@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. The project follows [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-11-08
+
+### Added
+- `CeibaDB::usePdoResolver(?callable $resolver)`: every instance created afterwards takes its connection from the resolver instead of opening its own, while keeping its own configuration (prefix, driver). The resolver receives that configuration and runs on each `pdo()` call. Host applications use it to make several packages (for example `ase_` and `cms_` tables) share one connection, so their writes join the host's transactions. Tests use it to bind every package to the test database. `hasPdoResolver()` reports whether it is active.
+
+### Changed
+- `resetInstances()` also clears the PDO resolver.
+
 ## [1.1.0] - 2026-11-07
 
 ### Security

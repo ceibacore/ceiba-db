@@ -110,7 +110,18 @@ Parameter values are never included in events.
 composer test
 ```
 
-Set `CEIBADB_TEST_MYSQL_HOST`, `CEIBADB_TEST_MYSQL_PORT`, `CEIBADB_TEST_MYSQL_DB`, `CEIBADB_TEST_MYSQL_USER` and `CEIBADB_TEST_MYSQL_PASS` to also run the MySQL/MariaDB contract tests. For tests, `CeibaDB::setInstance($pdo)` makes every `getInstance()` return that connection; call `CeibaDB::resetInstances()` in `tearDown()`.
+Set `CEIBADB_TEST_MYSQL_HOST`, `CEIBADB_TEST_MYSQL_PORT`, `CEIBADB_TEST_MYSQL_DB`, `CEIBADB_TEST_MYSQL_USER` and `CEIBADB_TEST_MYSQL_PASS` to also run the MySQL/MariaDB contract tests. For tests, `CeibaDB::setInstance($pdo)` makes every `getInstance()` return that single instance; call `CeibaDB::resetInstances()` in `tearDown()`.
+
+### Sharing a host connection
+
+When several packages use CeibaDB with different prefixes, `usePdoResolver()` makes all of them reuse one connection while each keeps its own configuration:
+
+```php
+// Laravel: every CeibaDB instance runs on the framework connection (and its transactions).
+CeibaDB::usePdoResolver(fn (array $config) => DB::connection()->getPdo());
+```
+
+Call `CeibaDB::usePdoResolver(null)` (or `resetInstances()`) to return to dedicated connections.
 
 ## Backward compatibility
 
