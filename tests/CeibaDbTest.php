@@ -31,6 +31,11 @@ class CeibaDbTest extends TestCase
         $this->db = CeibaDB::getInstance();
     }
 
+    protected function tearDown(): void
+    {
+        CeibaDB::resetInstances();
+    }
+
     public function test_singleton_and_aliases(): void
     {
         $this->assertInstanceOf(CeibaDB::class, $this->db);
@@ -65,7 +70,7 @@ class CeibaDbTest extends TestCase
         $sql = $query->toSql();
         $this->assertStringContainsString('SELECT id, name, email FROM `users`', $sql);
         $this->assertStringContainsString('WHERE `status` = ?', $sql);
-        $this->assertStringContainsString('LIMIT 0, 10', $sql);
+        $this->assertStringContainsString('LIMIT 10 OFFSET 0', $sql);
     }
 
     public function test_order_by_chains_quotes_reserved_words_and_keeps_raw_expressions(): void

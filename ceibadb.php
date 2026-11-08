@@ -1,87 +1,90 @@
 <?php
 
 /**
- * CeibaDB
+ * CeibaDB — lightweight PDO connection manager and fluent query builder.
  *
- * Minimal database wrapper that exposes a PDO-backed CeibaQuery
- * with full CRUD support: SELECT, INSERT, UPDATE, DELETE.
- *
- * v1.5.0 — Added:
- *   - transaction()  : Atomic callable wrapper with auto commit/rollback.
- *   - join()         : INNER JOIN support on CeibaQuery.
- *   - leftJoin()     : LEFT JOIN support on CeibaQuery.
- *   - rightJoin()    : RIGHT JOIN support on CeibaQuery.
- *   - whereRaw()     : Raw WHERE condition with bound params.
- *   - toJoinSql()    : Debug helper — renders JOIN clauses.
+ * Global classes (CeibaDB, CeibaQuery) with LemurDB/LemurQuery aliases for
+ * backward compatibility. See CHANGELOG.md for the version history.
  */
 if (!class_exists('CeibaDB')) {
     class CeibaDB
     {
-        /**
-         * Array of singleton instances keyed by prefix/config hash.
-         *
-         * @var array
-         */
-        private static $instances = [];
+        public const VERSION = '1.1.0';
 
-        /**
-         * Singleton instance (fallback/default for setInstance compatibility).
-         *
-         * @var CeibaDB|null
-         */
-        private static $instance = null;
+        /** Accepted driver names => PDO driver. */
+        private const DRIVERS = [
+            'mysql'    => 'mysql',
+            'mariadb'  => 'mysql',
+            'pgsql'    => 'pgsql',
+            'postgres' => 'pgsql',
+            'sqlite'   => 'sqlite',
+        ];
 
-        /**
-         * Flag indicating if a manual mock/setInstance was applied.
-         *
-         * @var bool
-         */
-        private static $isMocked = false;
+        private const DEFAULT_PORTS = ['mysql' => 3306, 'pgsql' => 5432];
 
-        /**
-         * Active PDO connection.
-         *
-         * @var PDO|callable
-         */
+        /** @var array<string, CeibaDB> Instances keyed by configuration hash. */
+        private static array $instances = [];
+
+        /** Default instance (first configured one, or the one set by setInstance()). */
+        private static ?CeibaDB $instance = null;
+
+        /** When true, getInstance() always returns the instance given to setInstance(). */
+        private static bool $isMocked = false;
+
+        /** @var list<callable(array): void> */
+        private static array $listeners = [];
+
+        /** @var PDO|callable|null */
         private $pdo;
 
-        /**
-         * Connection configuration.
-         *
-         * @var array
-         */
-        private $config;
+        private array $config;
+
+        private int $savepoints = 0;
 
         /**
-         * Create a new CeibaDB instance.
-         *
-         * @param array $config
-         * @param string $config['driver']   PDO driver name (e.g., mysql, pgsql).
-         * @param string $config['host']     Database host.
-         * @param int|string $config['port'] Database port.
-         * @param string $config['db']       Database name.
-         * @param string $config['username'] Username.
-         * @param string $config['password'] Password.
-         * @param string $config['prefix']   Optional table prefix.
+         * @param array $config driver, host, port, db, username, password, prefix, charset,
+         *                      unix_socket, timeout, persistent, options (PDO attributes)
          */
-        private function __construct(array $config)
+        private function __construct(array $config, mixed $pdo = null)
         {
             $this->config = $config;
-            $dsn = $this->buildDsn($config);
+            if ($pdo !== null) {
+                $this->pdo = $pdo;
+                return;
+            }
+            $this->connect();
+        }
+
+        /** Opens the PDO connection described by the configuration. */
+        private function connect(): void
+        {
+            $config = $this->config;
+            $dsn = self::buildDsn($config);
+            $options = [
+                PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                PDO::ATTR_EMULATE_PREPARES   => false,
+            ];
+            if (isset($config['timeout'])) {
+                $options[PDO::ATTR_TIMEOUT] = max(1, (int) $config['timeout']);
+            }
+            if (!empty($config['persistent'])) {
+                $options[PDO::ATTR_PERSISTENT] = true;
+            }
+            if (isset($config['options']) && is_array($config['options'])) {
+                $options = array_replace($options, $config['options']);
+            }
+            // Exceptions are part of the contract (transactions, guards); never configurable.
+            $options[PDO::ATTR_ERRMODE] = PDO::ERRMODE_EXCEPTION;
 
             try {
-                $this->pdo = new PDO($dsn, $config['username'] ?? '', $config['password'] ?? '', [
-                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                    PDO::ATTR_EMULATE_PREPARES => false,
-                ]);
+                $this->pdo = new PDO($dsn, $config['username'] ?? '', $config['password'] ?? '', $options);
             } catch (PDOException $e) {
                 $base = "Connection Error: " . $e->getMessage();
                 $debugEnabled = filter_var((string) (getenv('CEIBADB_DEBUG') ?: getenv('LEMURDB_DEBUG') ?: '0'), FILTER_VALIDATE_BOOLEAN);
 
                 if ($debugEnabled) {
-                    $safeConfig = self::redactConfig($config);
-                    $debugInfo = self::buildDebugInfo($safeConfig, $dsn);
+                    $debugInfo = self::buildDebugInfo(self::redactConfig($config), $dsn);
                     error_log('[CeibaDB] ' . $base . ' | ' . $debugInfo);
                     throw new \RuntimeException($base . " | " . $debugInfo, 0, $e);
                 }
@@ -96,12 +99,12 @@ if (!class_exists('CeibaDB')) {
             if (array_key_exists('password', $safe)) {
                 $safe['password'] = '[REDACTED]';
             }
+            unset($safe['options']);
             return $safe;
         }
 
         private static function buildDebugInfo(array $safeConfig, string $dsn): string
         {
-            $pdoLoaded = class_exists('PDO') ? 'yes' : 'no';
             $pdoDrivers = class_exists('PDO') ? implode(',', PDO::getAvailableDrivers()) : 'unavailable';
             $exts = function_exists('get_loaded_extensions')
                 ? implode(',', array_filter(get_loaded_extensions(), static function ($ext) {
@@ -111,30 +114,29 @@ if (!class_exists('CeibaDB')) {
                 : 'unavailable';
 
             return 'ceibadb_debug=' . json_encode([
-                'php' => PHP_VERSION,
-                'pdo_loaded' => $pdoLoaded,
+                'php'         => PHP_VERSION,
                 'pdo_drivers' => $pdoDrivers,
-                'db_exts' => $exts,
-                'dsn' => $dsn,
-                'config' => $safeConfig,
+                'db_exts'     => $exts,
+                'dsn'         => $dsn,
+                'config'      => $safeConfig,
             ], JSON_UNESCAPED_SLASHES);
         }
 
         /**
-         * Get the singleton instance (creates it on first call).
-         *
-         * @param array $config Connection configuration.
-         * @return CeibaDB
+         * Returns the instance for this configuration, creating and connecting it once.
+         * With an empty configuration, returns the default instance.
          */
         public static function getInstance(array $config = []): self
         {
-            // If a manual mock has been set (typically in SQLite tests), always return it.
-            // Also fallback to it if called with empty config.
+            // A mock set by setInstance() wins (test isolation); empty config means "default".
             if (self::$instance !== null && (self::$isMocked || empty($config))) {
                 return self::$instance;
             }
+            if (empty($config)) {
+                throw new \RuntimeException('CeibaDB is not configured: call CeibaDB::getInstance($config) first.');
+            }
 
-            $key = md5(serialize($config));
+            $key = self::configKey($config);
             if (!isset(self::$instances[$key])) {
                 $db = new self($config);
                 self::$instances[$key] = $db;
@@ -146,100 +148,219 @@ if (!class_exists('CeibaDB')) {
         }
 
         /**
-         * Manually set the CeibaDB singleton instance with an existing PDO connection or a callable that resolves to one.
-         * Useful for running unit tests on shared SQLite in-memory connections.
+         * Sets the default instance from an existing PDO (or a resolver returning one).
+         * While set, getInstance() returns it for any configuration (test isolation).
+         * Undo with resetInstances().
          */
         public static function setInstance(\PDO|callable $pdo, array $config = []): void
         {
-            $db = new self(array_merge([
-                'driver'   => 'sqlite',
-                'host'     => 'localhost',
-                'port'     => 3306,
-                'db'       => ':memory:',
-                'username' => '',
-                'password' => '',
-                'prefix'   => 'ase_',
-            ], $config));
-            $db->pdo = $pdo;
-            self::$instance = $db;
-            self::$isMocked = true; // Mark as mocked to skip multi-instance resolution in tests
+            self::$instance = new self(array_merge([
+                'driver' => 'sqlite',
+                'db'     => ':memory:',
+                'prefix' => 'ase_',
+            ], $config), $pdo);
+            self::$isMocked = true;
         }
 
         /**
-         * Build a PDO DSN string from config.
-         *
-         * @param array $c Connection configuration.
-         * @return string
+         * Drops the cached instance for this configuration (long-running workers serving
+         * many tenants). Its connection closes once no other reference remains.
          */
-        private function buildDsn(array $c): string
+        public static function forget(array $config): void
         {
-            if (isset($c['driver']) && $c['driver'] === 'sqlite') {
-                return "sqlite:" . $c['db'];
+            $key = self::configKey($config);
+            if (isset(self::$instances[$key])) {
+                if (self::$instance === self::$instances[$key] && !self::$isMocked) {
+                    self::$instance = null;
+                }
+                unset(self::$instances[$key]);
             }
-            return "{$c['driver']}:host={$c['host']};port={$c['port']};dbname={$c['db']};charset=utf8mb4";
+        }
+
+        /** Clears every cached instance, the default instance and the mock flag. */
+        public static function resetInstances(): void
+        {
+            self::$instances = [];
+            self::$instance = null;
+            self::$isMocked = false;
+        }
+
+        /** Number of cached connections (operational visibility). */
+        public static function instanceCount(): int
+        {
+            return count(self::$instances);
         }
 
         /**
-         * Start a query builder for a table.
-         *
-         * @param string $table Table name without prefix.
-         * @return CeibaQuery
+         * Registers a query listener. Each executed statement produces:
+         * ['sql' => string, 'params' => int (count, never values), 'durationMs' => float,
+         *  'error' => ?string (exception class)]. Listener failures never affect queries.
          */
+        public static function listen(callable $listener): void
+        {
+            self::$listeners[] = $listener;
+        }
+
+        public static function clearListeners(): void
+        {
+            self::$listeners = [];
+        }
+
+        /** @internal Called by CeibaQuery after each statement. */
+        public static function dispatchQuery(string $sql, int $paramCount, float $durationMs, ?\Throwable $error = null): void
+        {
+            if (self::$listeners === []) {
+                return;
+            }
+            $event = ['sql' => $sql, 'params' => $paramCount, 'durationMs' => round($durationMs, 3),
+                'error' => $error === null ? null : get_class($error)];
+            foreach (self::$listeners as $listener) {
+                try {
+                    $listener($event);
+                } catch (\Throwable) {
+                    // Observability must never break data access.
+                }
+            }
+        }
+
+        private static function configKey(array $config): string
+        {
+            return hash('sha256', serialize($config));
+        }
+
+        /** Builds a validated, driver-specific DSN. */
+        private static function buildDsn(array $c): string
+        {
+            $requested = strtolower((string) ($c['driver'] ?? 'mysql'));
+            $driver = self::DRIVERS[$requested] ?? null;
+            if ($driver === null) {
+                throw new \InvalidArgumentException("Unsupported CeibaDB driver: {$requested}");
+            }
+
+            if ($driver === 'sqlite') {
+                $path = (string) ($c['db'] ?? '');
+                if ($path === '' || preg_match('/[\x00-\x1F]/', $path)) {
+                    throw new \InvalidArgumentException('A valid SQLite database path is required');
+                }
+                return 'sqlite:' . $path;
+            }
+
+            foreach (['host', 'db', 'charset', 'unix_socket'] as $field) {
+                if (isset($c[$field]) && preg_match('/[;=\s\x00-\x1F]/', (string) $c[$field])) {
+                    throw new \InvalidArgumentException("Invalid characters in CeibaDB connection option '{$field}'");
+                }
+            }
+            $port = $c['port'] ?? self::DEFAULT_PORTS[$driver];
+            if (!preg_match('/^\d{1,5}$/', (string) $port) || (int) $port < 1 || (int) $port > 65535) {
+                throw new \InvalidArgumentException('Invalid CeibaDB port');
+            }
+            if (empty($c['db'])) {
+                throw new \InvalidArgumentException('A database name is required');
+            }
+
+            if ($driver === 'pgsql') {
+                return "pgsql:host=" . ($c['host'] ?? '127.0.0.1') . ";port={$port};dbname={$c['db']}";
+            }
+
+            $target = !empty($c['unix_socket'])
+                ? "unix_socket={$c['unix_socket']}"
+                : "host=" . ($c['host'] ?? '127.0.0.1') . ";port={$port}";
+            $charset = $c['charset'] ?? 'utf8mb4';
+            return "mysql:{$target};dbname={$c['db']};charset={$charset}";
+        }
+
+        /** Starts a query builder for a table (name without prefix). */
         public function query(string $table): CeibaQuery
         {
             return new CeibaQuery($this->pdo(), $table, $this->getPrefix());
         }
 
-        /**
-         * Get the table prefix.
-         *
-         * @return string
-         */
         public function getPrefix(): string
         {
             return $this->config['prefix'] ?? '';
         }
 
         /**
-         * Execute a callable inside an atomic database transaction.
+         * Runs the callable atomically and returns its result.
          *
-         * Automatically commits on success or rolls back on any Throwable.
-         * The CeibaDB instance is passed to the callable for convenience.
+         * - Commits on success, rolls back on any Throwable and rethrows it.
+         * - Called inside an active transaction (from CeibaDB or raw PDO), it uses a
+         *   SAVEPOINT, so nested units of work roll back on their own.
+         * - $attempts > 1 retries the outermost transaction on deadlocks and
+         *   serialization failures only (MySQL 1213, SQLSTATE 40001/40P01).
          *
-         * @param callable $callback  Function to execute. Receives this CeibaDB instance.
-         * @return mixed              Value returned by the callable.
-         * @throws \Throwable         Re-throws any exception after rolling back.
-         *
-         * @example
-         * $db->transaction(function (CeibaDB $db) {
-         *     $db->query('orders')->insert([...]);
-         *     $db->query('invoices')->insert([...]);
-         * });
+         * @param callable(CeibaDB): mixed $callback
          */
-        public function transaction(callable $callback): mixed
+        public function transaction(callable $callback, int $attempts = 1): mixed
         {
+            if ($attempts < 1) {
+                throw new \InvalidArgumentException('Transaction attempts must be at least 1');
+            }
             $pdo = $this->pdo();
-            $pdo->beginTransaction();
+            if ($pdo->inTransaction()) {
+                return $this->savepoint($pdo, $callback);
+            }
+
+            for ($try = 1; ; $try++) {
+                $pdo->beginTransaction();
+                try {
+                    $result = $callback($this);
+                    $pdo->commit();
+                    return $result;
+                } catch (\Throwable $e) {
+                    if ($pdo->inTransaction()) {
+                        try {
+                            $pdo->rollBack();
+                        } catch (\Throwable) {
+                            // Server already rolled back (deadlock); keep the original error.
+                        }
+                    }
+                    if ($try < $attempts && self::isRetryable($e)) {
+                        usleep(min(1_000_000, 25_000 * (2 ** ($try - 1))));
+                        continue;
+                    }
+                    throw $e;
+                }
+            }
+        }
+
+        private function savepoint(PDO $pdo, callable $callback): mixed
+        {
+            $name = 'ceibadb_sp_' . (++$this->savepoints);
+            $pdo->exec("SAVEPOINT {$name}");
             try {
                 $result = $callback($this);
-                $pdo->commit();
+                $pdo->exec("RELEASE SAVEPOINT {$name}");
                 return $result;
             } catch (\Throwable $e) {
-                $pdo->rollBack();
+                try {
+                    $pdo->exec("ROLLBACK TO SAVEPOINT {$name}");
+                    $pdo->exec("RELEASE SAVEPOINT {$name}");
+                } catch (\Throwable) {
+                    // The enclosing transaction may already be gone; the original error matters.
+                }
                 throw $e;
             }
         }
 
+        private static function isRetryable(\Throwable $e): bool
+        {
+            if (!$e instanceof PDOException) {
+                return false;
+            }
+            $state = (string) ($e->errorInfo[0] ?? $e->getCode());
+            $driverCode = (int) ($e->errorInfo[1] ?? 0);
+            return in_array($state, ['40001', '40P01'], true) || $driverCode === 1213;
+        }
+
         /**
-         * Expose the underlying PDO connection.
-         *
-         * Intended for advanced use cases (e.g. manual transaction management,
-         * raw queries) that are not covered by the query builder API.
-         *
-         * @return PDO
+         * The underlying PDO connection, for raw statements not covered by the builder.
          */
         public function pdo(): PDO
         {
+            if ($this->pdo === null) {
+                $this->connect();
+            }
             if (is_callable($this->pdo)) {
                 $resolved = ($this->pdo)();
                 if (!$resolved instanceof \PDO) {
@@ -249,6 +370,17 @@ if (!class_exists('CeibaDB')) {
             }
             return $this->pdo;
         }
+
+        /**
+         * Releases this instance's own connection (reopened lazily on next use).
+         * Has no effect on connections supplied through setInstance().
+         */
+        public function disconnect(): void
+        {
+            if ($this->pdo instanceof PDO && !self::$isMocked) {
+                $this->pdo = null;
+            }
+        }
     }
 }
 
@@ -256,263 +388,271 @@ if (!class_exists('CeibaDB')) {
 /**
  * CeibaQuery
  *
- * Fluent query builder for SELECT, INSERT, UPDATE, and DELETE.
+ * Fluent query builder for SELECT, INSERT, UPDATE and DELETE.
+ * Column arguments accept identifiers only (`col`, `table.col`, or already quoted
+ * names); use whereRaw()/orderByRaw() for expressions. select() and join() take
+ * raw SQL fragments by design.
  */
 if (!class_exists('CeibaQuery')) {
     class CeibaQuery
     {
-        /**
-         * Active PDO connection.
-         *
-         * @var PDO
-         */
+        private const OPERATORS = ['=', '!=', '<>', '<', '<=', '>', '>=', 'LIKE', 'NOT LIKE'];
+        private const IDENTIFIER = '/^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)?$/';
+        private const QUOTED_IDENTIFIER = '/^(`[^`]+`|"[^"]+")(\.(`[^`]+`|"[^"]+"))?$/';
+        /** Stay well below the 65,535 placeholders MySQL and PostgreSQL allow per statement. */
+        private const MAX_PARAMS_PER_STATEMENT = 60000;
+
         protected PDO $pdo;
 
-        /**
-         * Fully qualified table name (with prefix).
-         *
-         * @var string
-         */
+        /** Fully qualified, quoted table name (with prefix). */
         protected string $table;
 
-        /**
-         * Query parts and bound parameters.
-         *
-         * @var array
-         */
+        protected string $driver;
+
         protected array $clauses = [
-            'select' => '*',
-            'joins' => [],
-            'where' => [],
-            'params' => [],
-            'order' => '',
-            'limit' => '',
+            'select'  => '*',
+            'joins'   => [],
+            'where'   => [],
+            'params'  => [],
+            'order'   => '',
+            'limit'   => '',
             'between' => [],
         ];
 
-        /**
-         * Create a new CeibaQuery.
-         *
-         * @param PDO    $pdo    Active PDO connection.
-         * @param string $table  Table name without prefix.
-         * @param string $prefix Optional table prefix.
-         */
         public function __construct(PDO $pdo, string $table, string $prefix = '')
         {
             $this->pdo = $pdo;
+            try {
+                $this->driver = (string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+            } catch (\Throwable) {
+                $this->driver = 'mysql';
+            }
+            if (!preg_match(self::IDENTIFIER, $prefix . $table)) {
+                throw new \InvalidArgumentException("Invalid table name: {$prefix}{$table}");
+            }
             $this->table = $this->quoteIdentifier($prefix . $table);
         }
 
-        /**
-         * Quote a SQL identifier (table or column name).
-         *
-         * @param string $identifier
-         * @return string
-         */
+        /** Quotes an identifier (or table.column) for the connection's driver. */
         protected function quoteIdentifier(string $identifier): string
         {
-            // Handle table.column format
             if (strpos($identifier, '.') !== false) {
                 return implode('.', array_map([$this, 'quoteIdentifier'], explode('.', $identifier)));
             }
-            return "`" . str_replace("`", "``", $identifier) . "`";
+            $q = $this->driver === 'pgsql' ? '"' : '`';
+            return $q . str_replace($q, $q . $q, $identifier) . $q;
+        }
+
+        /** Validates and quotes a column argument; rejects SQL expressions. */
+        protected function column(string $column): string
+        {
+            $column = trim($column);
+            if (preg_match(self::IDENTIFIER, $column)) {
+                return $this->quoteIdentifier($column);
+            }
+            if (preg_match(self::QUOTED_IDENTIFIER, $column)) {
+                return $column;
+            }
+            throw new \InvalidArgumentException(
+                "Invalid column identifier '{$column}'. Use whereRaw()/orderByRaw() for SQL expressions."
+            );
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // JOIN METHODS
+        // JOIN METHODS (raw table and condition; tables are NOT prefixed automatically)
         // ─────────────────────────────────────────────────────────────────────────
 
-        /**
-         * Add an INNER JOIN clause.
-         *
-         * @param string $table  Table to join (without prefix).
-         * @param string $on     Raw ON condition, e.g. "orders.user_id = users.id".
-         * @return $this
-         *
-         * @example
-         * $db->query('orders')
-         *    ->join('users', 'orders.user_id = users.id')
-         *    ->select(['orders.id', 'users.name'])
-         *    ->get();
-         */
         public function join(string $table, string $on): static
         {
             return $this->addJoin('INNER', $table, $on);
         }
 
-        /**
-         * Add a LEFT JOIN clause.
-         *
-         * @param string $table  Table to join (without prefix).
-         * @param string $on     Raw ON condition.
-         * @return $this
-         */
         public function leftJoin(string $table, string $on): static
         {
             return $this->addJoin('LEFT', $table, $on);
         }
 
-        /**
-         * Add a RIGHT JOIN clause.
-         *
-         * @param string $table  Table to join (without prefix).
-         * @param string $on     Raw ON condition.
-         * @return $this
-         */
         public function rightJoin(string $table, string $on): static
         {
             return $this->addJoin('RIGHT', $table, $on);
         }
 
-        /**
-         * Internal: registers a JOIN clause.
-         *
-         * @param string $type   JOIN type: INNER, LEFT, RIGHT.
-         * @param string $table  Table name (without prefix).
-         * @param string $on     ON condition.
-         * @return $this
-         */
         private function addJoin(string $type, string $table, string $on): static
         {
             $this->clauses['joins'][] = strtoupper($type) . " JOIN {$table} ON {$on}";
             return $this;
         }
 
+        // ─────────────────────────────────────────────────────────────────────────
+        // ORDER / LIMIT
+        // ─────────────────────────────────────────────────────────────────────────
+
         /**
-         * Add an ORDER BY clause.
-         *
-         * @param string $column    Column to sort by.
-         * @param string $direction "ASC" or "DESC".
-         * @return $this
+         * Adds a sort key; successive calls accumulate. "column DESC" is accepted.
          */
         public function orderBy(string $column, string $direction = 'ASC'): static
         {
             $dir = strtoupper($direction) === 'DESC' ? 'DESC' : 'ASC';
             $column = trim($column);
-            // "column DESC" is accepted for backward compatibility; the embedded direction wins.
             if (preg_match('/^(.+?)\s+(ASC|DESC)$/i', $column, $parts)) {
                 $column = $parts[1];
                 $dir = strtoupper($parts[2]);
             }
-            // Plain identifiers (column or table.column) are quoted so reserved words such as
-            // `key` or `group` work; already quoted names and expressions are kept as given.
-            $expression = preg_match('/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/', $column)
-                ? $this->quoteIdentifier($column)
-                : $column;
-            // Successive calls add sort keys instead of replacing the previous one.
-            $this->clauses['order'] .= ($this->clauses['order'] === '' ? ' ORDER BY ' : ', ') . "{$expression} {$dir}";
+            return $this->orderByRaw($this->column($column) . " {$dir}");
+        }
+
+        /** Adds a raw ORDER BY fragment (trusted SQL only). */
+        public function orderByRaw(string $sql): static
+        {
+            $this->clauses['order'] .= ($this->clauses['order'] === '' ? ' ORDER BY ' : ', ') . $sql;
+            return $this;
+        }
+
+        public function limit(int $limit, int $offset = 0): static
+        {
+            if ($limit < 0 || $offset < 0) {
+                throw new \InvalidArgumentException('LIMIT and OFFSET must be non-negative');
+            }
+            $this->clauses['limit'] = " LIMIT {$limit} OFFSET {$offset}";
             return $this;
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // SELECT METHODS
+        // SELECT / WHERE
         // ─────────────────────────────────────────────────────────────────────────
 
-        /**
-         * Set select fields.
-         *
-         * @param string|array $fields "*" or a list of fields.
-         * @return $this
-         */
+        /** Sets the select list (raw SQL: columns, aliases or aggregates). */
         public function select(string|array $fields = '*'): static
         {
-            $this->clauses['select'] = is_array($fields)
-                ? implode(', ', $fields)
-                : $fields;
+            $this->clauses['select'] = is_array($fields) ? implode(', ', $fields) : $fields;
             return $this;
         }
 
         /**
-         * Add equality WHERE conditions (AND).
-         *
-         * @param array $conditions Key/value pairs, e.g. ['status' => 1].
-         * @return $this
+         * AND conditions: where(['col' => value, ...]), where('col', value) or
+         * where('col', '>=', value). A null value compares with IS NULL / IS NOT NULL.
          */
-        public function where(array $conditions): static
+        public function where(array|string $column, mixed $operator = null, mixed $value = null): static
         {
-            foreach ($conditions as $column => $value) {
-                $quoted = $this->quoteIdentifier($column);
-                $this->addWhere("{$quoted} = ?", [$value], 'AND');
-                $this->clauses['params'][] = $value;
+            return $this->addConditions('AND', $column, $operator, $value, func_num_args());
+        }
+
+        /** OR conditions, with the same forms as where(). */
+        public function orWhere(array|string $column, mixed $operator = null, mixed $value = null): static
+        {
+            return $this->addConditions('OR', $column, $operator, $value, func_num_args());
+        }
+
+        private function addConditions(string $boolean, array|string $column, mixed $operator, mixed $value, int $argc): static
+        {
+            if (is_array($column)) {
+                foreach ($column as $name => $item) {
+                    $this->addComparison($boolean, (string) $name, '=', $item);
+                }
+                return $this;
             }
+            if ($argc < 2) {
+                throw new \InvalidArgumentException('where() needs a value');
+            }
+            return $argc === 2
+                ? $this->addComparison($boolean, $column, '=', $operator)
+                : $this->addComparison($boolean, $column, (string) $operator, $value);
+        }
+
+        private function addComparison(string $boolean, string $column, string $operator, mixed $value): static
+        {
+            $op = strtoupper(trim($operator));
+            if (!in_array($op, self::OPERATORS, true)) {
+                throw new \InvalidArgumentException("Unsupported operator: {$operator}");
+            }
+            $col = $this->column($column);
+            if ($value === null) {
+                if ($op === '=') {
+                    $this->addWhere("{$col} IS NULL", [], $boolean);
+                    return $this;
+                }
+                if ($op === '!=' || $op === '<>') {
+                    $this->addWhere("{$col} IS NOT NULL", [], $boolean);
+                    return $this;
+                }
+                throw new \InvalidArgumentException("Operator {$op} cannot compare with NULL");
+            }
+            if (is_array($value)) {
+                throw new \InvalidArgumentException("Array value for '{$column}': use whereIn()");
+            }
+            $this->addWhere("{$col} {$op} ?", [$value], $boolean);
+            $this->clauses['params'][] = $value;
             return $this;
         }
 
-        /**
-         * Add a BETWEEN condition (AND).
-         *
-         * @param string $column Column name.
-         * @param mixed  $start  Start value.
-         * @param mixed  $end    End value.
-         * @return $this
-         */
+        /** IN list; an empty list matches nothing (or everything when negated). */
+        public function whereIn(string $column, array $values, string $boolean = 'AND', bool $not = false): static
+        {
+            $col = $this->column($column);
+            if ($values === []) {
+                $this->addWhere($not ? '1 = 1' : '1 = 0', [], $boolean);
+                return $this;
+            }
+            foreach ($values as $item) {
+                if (is_array($item) || $item === null) {
+                    throw new \InvalidArgumentException('whereIn() values must be non-null scalars');
+                }
+            }
+            $values = array_values($values);
+            $placeholders = implode(', ', array_fill(0, count($values), '?'));
+            $this->addWhere("{$col} " . ($not ? 'NOT IN' : 'IN') . " ({$placeholders})", $values, $boolean);
+            array_push($this->clauses['params'], ...$values);
+            return $this;
+        }
+
+        public function whereNotIn(string $column, array $values, string $boolean = 'AND'): static
+        {
+            return $this->whereIn($column, $values, $boolean, true);
+        }
+
+        public function whereNull(string $column, string $boolean = 'AND'): static
+        {
+            $this->addWhere($this->column($column) . ' IS NULL', [], $boolean);
+            return $this;
+        }
+
+        public function whereNotNull(string $column, string $boolean = 'AND'): static
+        {
+            $this->addWhere($this->column($column) . ' IS NOT NULL', [], $boolean);
+            return $this;
+        }
+
         public function between(string $column, mixed $start, mixed $end): static
         {
-            $this->addWhere("{$column} BETWEEN ? AND ?", [$start, $end], 'AND');
+            return $this->addBetween('AND', $column, $start, $end);
+        }
+
+        public function orBetween(string $column, mixed $start, mixed $end): static
+        {
+            return $this->addBetween('OR', $column, $start, $end);
+        }
+
+        private function addBetween(string $boolean, string $column, mixed $start, mixed $end): static
+        {
+            $this->addWhere($this->column($column) . ' BETWEEN ? AND ?', [$start, $end], $boolean);
             $this->clauses['params'][] = $start;
             $this->clauses['params'][] = $end;
             return $this;
         }
 
-        /**
-         * Add equality WHERE conditions (OR).
-         *
-         * @param array $conditions Key/value pairs, e.g. ['status' => 1].
-         * @return $this
-         */
-        public function orWhere(array $conditions): static
-        {
-            foreach ($conditions as $column => $value) {
-                $this->addWhere("{$column} = ?", [$value], 'OR');
-                $this->clauses['params'][] = $value;
-            }
-            return $this;
-        }
-
-        /**
-         * Add a LIKE condition.
-         *
-         * @param string $column  Column name.
-         * @param string $pattern LIKE pattern (e.g. "%usb%").
-         * @param string $boolean "AND" or "OR".
-         * @return $this
-         */
         public function like(string $column, string $pattern, string $boolean = 'AND'): static
         {
-            $this->addWhere("{$column} LIKE ?", [$pattern], $boolean);
+            $this->addWhere($this->column($column) . ' LIKE ?', [$pattern], $boolean);
             $this->clauses['params'][] = $pattern;
             return $this;
         }
 
-        /**
-         * Add a LIKE condition with OR.
-         *
-         * @param string $column  Column name.
-         * @param string $pattern LIKE pattern (e.g. "%usb%").
-         * @return $this
-         */
         public function orLike(string $column, string $pattern): static
         {
             return $this->like($column, $pattern, 'OR');
         }
 
-        /**
-         * Add a raw WHERE condition with manually bound parameters.
-         *
-         * Use this for complex expressions that the fluent API cannot express,
-         * such as IS NULL, IS NOT NULL, IN (...), or subqueries.
-         *
-         * @param string $sql     Raw SQL fragment, e.g. "status IS NOT NULL".
-         * @param array  $params  Positional bound parameters for the fragment.
-         * @param string $boolean "AND" or "OR".
-         * @return $this
-         *
-         * @example
-         * $db->query('orders')
-         *    ->whereRaw('canceled_at IS NULL')
-         *    ->whereRaw('amount > ?', [100])
-         *    ->get();
-         */
+        /** Raw WHERE fragment with positional parameters (trusted SQL only). */
         public function whereRaw(string $sql, array $params = [], string $boolean = 'AND'): static
         {
             $this->addWhere($sql, $params, $boolean);
@@ -522,317 +662,264 @@ if (!class_exists('CeibaQuery')) {
             return $this;
         }
 
-        /**
-         * Add a BETWEEN condition with OR.
-         *
-         * @param string $column Column name.
-         * @param mixed  $start  Start value.
-         * @param mixed  $end    End value.
-         * @return $this
-         */
-        public function orBetween(string $column, mixed $start, mixed $end): static
-        {
-            $this->addWhere("{$column} BETWEEN ? AND ?", [$start, $end], 'OR');
-            $this->clauses['params'][] = $start;
-            $this->clauses['params'][] = $end;
-            return $this;
-        }
+        // ─────────────────────────────────────────────────────────────────────────
+        // READ
+        // ─────────────────────────────────────────────────────────────────────────
 
-        /**
-         * Add LIMIT / OFFSET.
-         *
-         * @param int $limit  Max rows.
-         * @param int $offset Offset (default 0).
-         * @return $this
-         */
-        public function limit(int $limit, int $offset = 0): static
-        {
-            $this->clauses['limit'] = " LIMIT {$offset}, {$limit}";
-            return $this;
-        }
-
-        /**
-         * Execute the SELECT query and return all results.
-         *
-         * @return array
-         */
         public function get(): array
         {
-            $stmt = $this->pdo->prepare($this->toSql());
-            $stmt->execute($this->clauses['params']);
-            return $stmt->fetchAll();
+            return $this->run($this->toSql(), $this->clauses['params'])->fetchAll();
         }
 
-        /**
-         * Execute the SELECT query and return a single row.
-         *
-         * @return array|null
-         */
+        /** First row or null; the builder itself is not modified. */
         public function first(): ?array
         {
-            $this->limit(1);
-            $stmt = $this->pdo->prepare($this->toSql());
-            $stmt->execute($this->clauses['params']);
-            $row = $stmt->fetch();
+            $query = clone $this;
+            $query->limit(1);
+            $row = $query->run($query->toSql(), $query->clauses['params'])->fetch();
             return $row !== false ? $row : null;
         }
 
-        /**
-         * Check if any rows exist matching the current query.
-         *
-         * @return bool
-         */
         public function exists(): bool
         {
-            return $this->first() !== null;
+            $query = clone $this;
+            $query->clauses['select'] = '1';
+            $query->clauses['order'] = '';
+            $query->limit(1);
+            return $query->run($query->toSql(), $query->clauses['params'])->fetchColumn() !== false;
+        }
+
+        /** Row count for the current conditions (ordering and limits are ignored). */
+        public function count(string $column = '*'): int
+        {
+            $query = clone $this;
+            $query->clauses['select'] = 'COUNT(' . ($column === '*' ? '*' : $this->column($column)) . ')';
+            $query->clauses['order'] = '';
+            $query->clauses['limit'] = '';
+            return (int) $query->run($query->toSql(), $query->clauses['params'])->fetchColumn();
+        }
+
+        /** Values of one column. */
+        public function pluck(string $column): array
+        {
+            $query = clone $this;
+            $query->clauses['select'] = $this->column($column);
+            return $query->run($query->toSql(), $query->clauses['params'])->fetchAll(PDO::FETCH_COLUMN);
+        }
+
+        /**
+         * Iterates rows one at a time. Rows are not accumulated in a PHP array; for
+         * true streaming on MySQL also disable PDO::MYSQL_ATTR_USE_BUFFERED_QUERY.
+         *
+         * @return \Generator<int, array>
+         */
+        public function cursor(): \Generator
+        {
+            $statement = $this->run($this->toSql(), $this->clauses['params']);
+            while (($row = $statement->fetch()) !== false) {
+                yield $row;
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // INSERT
+        // WRITE
         // ─────────────────────────────────────────────────────────────────────────
 
         /**
-         * Insert a single row into the table.
-         *
-         * @param array $data Associative array of column => value.
-         * @return int Last inserted ID.
-         *
-         * @example
-         * $db->query('users')->insert([
-         *     'name'  => 'John',
-         *     'email' => 'john@example.com',
-         * ]);
+         * Inserts one row. Returns the auto-increment ID, or 0 when the table has
+         * none (UUID keys) or the driver cannot report it.
          */
         public function insert(array $data): int
         {
             [$sql, $params] = $this->buildInsertSql([$data]);
-            $stmt = $this->pdo->prepare($sql);
-            $stmt->execute($params);
-            return (int) $this->pdo->lastInsertId();
+            $this->run($sql, $params);
+            try {
+                return (int) $this->pdo->lastInsertId();
+            } catch (\Throwable) {
+                return 0;
+            }
         }
 
         /**
-         * Insert multiple rows in a single query.
-         *
-         * @param array $rows Array of associative arrays (same keys required).
-         * @return int Number of rows inserted.
-         *
-         * @example
-         * $db->query('users')->insertBatch([
-         *     ['name' => 'Alice', 'email' => 'alice@example.com'],
-         *     ['name' => 'Bob',   'email' => 'bob@example.com'],
-         * ]);
+         * Inserts several rows with the same columns. Values are matched by column
+         * name. Large batches are split below the driver placeholder limit and run
+         * in one transaction (or inside the caller's).
          */
         public function insertBatch(array $rows): int
         {
-            if (empty($rows)) {
+            if ($rows === []) {
                 return 0;
             }
-            [$sql, $params] = $this->buildInsertSql($rows);
-            $stmt = $this->pdo->prepare($sql);
-            $stmt->execute($params);
-            return $stmt->rowCount();
+            $rows = array_values($rows);
+            $first = $rows[0];
+            if (!is_array($first) || $first === []) {
+                throw new \InvalidArgumentException('insertBatch() rows must be non-empty arrays');
+            }
+            $perStatement = max(1, intdiv(self::MAX_PARAMS_PER_STATEMENT, count($first)));
+            $chunks = array_chunk($rows, $perStatement);
+            if (count($chunks) === 1) {
+                [$sql, $params] = $this->buildInsertSql($rows);
+                return $this->run($sql, $params)->rowCount();
+            }
+
+            $ownTransaction = !$this->pdo->inTransaction();
+            if ($ownTransaction) {
+                $this->pdo->beginTransaction();
+            }
+            try {
+                $inserted = 0;
+                foreach ($chunks as $chunk) {
+                    [$sql, $params] = $this->buildInsertSql($chunk);
+                    $inserted += $this->run($sql, $params)->rowCount();
+                }
+                if ($ownTransaction) {
+                    $this->pdo->commit();
+                }
+                return $inserted;
+            } catch (\Throwable $e) {
+                if ($ownTransaction && $this->pdo->inTransaction()) {
+                    $this->pdo->rollBack();
+                }
+                throw $e;
+            }
         }
 
-        /**
-         * Build INSERT SQL for one or more rows.
-         *
-         * @param array $rows
-         * @return array [string $sql, array $params]
-         */
+        /** @return array{0: string, 1: list<mixed>} */
         private function buildInsertSql(array $rows): array
         {
-            $columns = array_keys($rows[0]);
-            $columnList = implode(', ', array_map([$this, 'quoteIdentifier'], $columns));
+            $first = $rows[0];
+            if (!is_array($first) || $first === []) {
+                throw new \InvalidArgumentException('Insert data must be a non-empty array');
+            }
+            $columns = array_keys($first);
+            $expected = $columns;
+            sort($expected);
+            $params = [];
+            foreach ($rows as $index => $row) {
+                $keys = is_array($row) ? array_keys($row) : [];
+                sort($keys);
+                if ($keys !== $expected) {
+                    throw new \InvalidArgumentException("Insert row {$index} must have the same columns as the first row");
+                }
+                foreach ($columns as $column) {
+                    $params[] = $row[$column];
+                }
+            }
+            $columnList = implode(', ', array_map(fn ($c) => $this->column((string) $c), $columns));
             $placeholder = '(' . implode(', ', array_fill(0, count($columns), '?')) . ')';
             $valueSets = implode(', ', array_fill(0, count($rows), $placeholder));
-
-            $sql = "INSERT INTO {$this->table} ({$columnList}) VALUES {$valueSets}";
-            $params = array_merge(...array_map('array_values', $rows));
-
-            return [$sql, $params];
+            return ["INSERT INTO {$this->table} ({$columnList}) VALUES {$valueSets}", $params];
         }
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // UPDATE
-        // ─────────────────────────────────────────────────────────────────────────
-
-        /**
-         * Update rows matching the current WHERE clauses.
-         *
-         * ⚠️  Requires at least one WHERE condition to prevent full-table updates.
-         *      Call where() / orWhere() before update().
-         *
-         * @param array $data Associative array of column => value to update.
-         * @return int Number of affected rows.
-         *
-         * @throws \RuntimeException if no WHERE clause is set.
-         *
-         * @example
-         * $db->query('users')
-         *    ->where(['id' => 5])
-         *    ->update(['name' => 'Jane', 'status' => 'active']);
-         */
+        /** Updates rows matching the WHERE clauses (at least one is required). */
         public function update(array $data): int
         {
-            if (empty($this->clauses['where'])) {
-                throw new \RuntimeException(
-                    "CeibaQuery::update() requires at least one WHERE condition. " .
-                    "Use where() before calling update() to avoid full-table updates."
-                );
+            $this->guardWhere('update');
+            if ($data === []) {
+                throw new \InvalidArgumentException('update() needs at least one column');
             }
-
-            $setClauses = array_map(
-                fn($col) => $this->quoteIdentifier($col) . " = ?",
-                array_keys($data)
-            );
-
-            $sql = "UPDATE {$this->table} SET " . implode(', ', $setClauses);
-            $sql .= " WHERE " . $this->renderWhere();
-            $params = array_merge(array_values($data), $this->clauses['params']);
-
-            $stmt = $this->pdo->prepare($sql);
-            $stmt->execute($params);
-            return $stmt->rowCount();
+            $set = implode(', ', array_map(fn ($c) => $this->column((string) $c) . ' = ?', array_keys($data)));
+            $sql = "UPDATE {$this->table} SET {$set} WHERE " . $this->renderWhere();
+            return $this->run($sql, array_merge(array_values($data), $this->clauses['params']))->rowCount();
         }
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // DELETE
-        // ─────────────────────────────────────────────────────────────────────────
-
         /**
-         * Delete rows matching the current WHERE clauses.
-         *
-         * ⚠️  Requires at least one WHERE condition to prevent full-table deletes.
-         *      Call where() / orWhere() before delete().
-         *
-         * @return int Number of affected rows.
-         *
-         * @throws \RuntimeException if no WHERE clause is set.
-         *
-         * @example
-         * $db->query('users')
-         *    ->where(['id' => 5])
-         *    ->delete();
+         * Atomically adds to a numeric column (plus optional extra columns).
+         * Requires at least one WHERE condition.
          */
+        public function increment(string $column, int|float $amount = 1, array $extra = []): int
+        {
+            $this->guardWhere('increment');
+            $col = $this->column($column);
+            $sets = ["{$col} = {$col} + ?"];
+            $params = [$amount];
+            foreach ($extra as $name => $value) {
+                $sets[] = $this->column((string) $name) . ' = ?';
+                $params[] = $value;
+            }
+            $sql = "UPDATE {$this->table} SET " . implode(', ', $sets) . ' WHERE ' . $this->renderWhere();
+            return $this->run($sql, array_merge($params, $this->clauses['params']))->rowCount();
+        }
+
+        public function decrement(string $column, int|float $amount = 1, array $extra = []): int
+        {
+            return $this->increment($column, -$amount, $extra);
+        }
+
+        /** Deletes rows matching the WHERE clauses (at least one is required). */
         public function delete(): int
         {
-            if (empty($this->clauses['where'])) {
-                throw new \RuntimeException(
-                    "CeibaQuery::delete() requires at least one WHERE condition. " .
-                    "Use where() before calling delete() to avoid full-table deletes."
-                );
-            }
-
+            $this->guardWhere('delete');
             $sql = "DELETE FROM {$this->table} WHERE " . $this->renderWhere();
-            $stmt = $this->pdo->prepare($sql);
-            $stmt->execute($this->clauses['params']);
-            return $stmt->rowCount();
+            return $this->run($sql, $this->clauses['params'])->rowCount();
         }
 
         /**
-         * Truncate the entire table (removes ALL rows, resets AUTO_INCREMENT).
-         *
-         * ⚠️  This operation cannot be undone. No WHERE clause applies.
-         *
-         * @return bool True on success.
-         *
-         * @example
-         * $db->query('cache')->truncate();
+         * Removes ALL rows (resets auto-increment where supported). Cannot be undone.
+         * SQLite has no TRUNCATE; DELETE FROM is used instead.
          */
         public function truncate(): bool
         {
-            return (bool) $this->pdo->exec("TRUNCATE TABLE {$this->table}");
+            $sql = $this->driver === 'sqlite' ? "DELETE FROM {$this->table}" : "TRUNCATE TABLE {$this->table}";
+            $this->run($sql, []);
+            return true;
+        }
+
+        private function guardWhere(string $operation): void
+        {
+            if (empty($this->clauses['where'])) {
+                throw new \RuntimeException(
+                    "CeibaQuery::{$operation}() requires at least one WHERE condition. " .
+                    "Use where() before calling {$operation}() to avoid full-table changes."
+                );
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────────────
         // DEBUG HELPERS
         // ─────────────────────────────────────────────────────────────────────────
 
-        /**
-         * Build the SQL string for the current SELECT query.
-         *
-         * @return string
-         */
         public function toSql(): string
         {
             $sql = "SELECT {$this->clauses['select']} FROM {$this->table}";
-
             if (!empty($this->clauses['joins'])) {
                 $sql .= " " . implode(" ", $this->clauses['joins']);
             }
-
             if (!empty($this->clauses['where'])) {
                 $sql .= " WHERE " . $this->renderWhere();
             }
-
-            $sql .= $this->clauses['order'] . $this->clauses['limit'];
-            return $sql;
+            return $sql . $this->clauses['order'] . $this->clauses['limit'];
         }
 
-        /**
-         * Return only the registered JOIN clauses as a SQL string (debug only).
-         *
-         * @return string
-         */
         public function toJoinSql(): string
         {
             return implode(' ', $this->clauses['joins']);
         }
 
-        /**
-         * Build the SQL string for the current UPDATE query (debug only).
-         *
-         * @param array $data Column => value pairs to update.
-         * @return string
-         */
         public function toUpdateSql(array $data): string
         {
-            $setClauses = array_map(fn($col) => "{$col} = ?", array_keys($data));
-            $sql = "UPDATE {$this->table} SET " . implode(', ', $setClauses);
-
+            $set = implode(', ', array_map(fn ($c) => $this->column((string) $c) . ' = ?', array_keys($data)));
+            $sql = "UPDATE {$this->table} SET {$set}";
             if (!empty($this->clauses['where'])) {
                 $sql .= " WHERE " . $this->renderWhere();
             }
-
             return $sql;
         }
 
-        /**
-         * Build the SQL string for the current DELETE query (debug only).
-         *
-         * @return string
-         */
         public function toDeleteSql(): string
         {
             $sql = "DELETE FROM {$this->table}";
-
             if (!empty($this->clauses['where'])) {
                 $sql .= " WHERE " . $this->renderWhere();
             }
-
             return $sql;
         }
 
-        /**
-         * Build the SQL string for an INSERT query (debug only).
-         *
-         * @param array $data Single row: column => value pairs.
-         * @return string
-         */
         public function toInsertSql(array $data): string
         {
-            $columns = array_keys($data);
-            $columnList = implode(', ', $columns);
-            $placeholder = '(' . implode(', ', array_fill(0, count($columns), '?')) . ')';
-            return "INSERT INTO {$this->table} ({$columnList}) VALUES {$placeholder}";
+            return $this->buildInsertSql([$data])[0];
         }
 
-        /**
-         * Get bound parameters in order (for SELECT / WHERE clauses).
-         *
-         * @return array
-         */
         public function getParams(): array
         {
             return $this->clauses['params'];
@@ -842,28 +929,54 @@ if (!class_exists('CeibaQuery')) {
         // INTERNAL HELPERS
         // ─────────────────────────────────────────────────────────────────────────
 
-        /**
-         * Add a WHERE clause entry with boolean connector.
-         *
-         * @param string $sql     Condition SQL (e.g. "col = ?").
-         * @param array  $params  Bound params for the condition.
-         * @param string $boolean "AND" or "OR".
-         * @return void
-         */
+        /** Prepares, binds with explicit types, executes and reports to listeners. */
+        private function run(string $sql, array $params): \PDOStatement
+        {
+            $started = hrtime(true);
+            $error = null;
+            try {
+                $statement = $this->pdo->prepare($sql);
+                foreach (array_values($params) as $index => $value) {
+                    [$bound, $type] = self::bindable($value);
+                    $statement->bindValue($index + 1, $bound, $type);
+                }
+                $statement->execute();
+                return $statement;
+            } catch (\Throwable $e) {
+                $error = $e;
+                throw $e;
+            } finally {
+                if (method_exists('CeibaDB', 'dispatchQuery')) {
+                    CeibaDB::dispatchQuery($sql, count($params), (hrtime(true) - $started) / 1e6, $error);
+                }
+            }
+        }
+
+        /** @return array{0: mixed, 1: int} */
+        private static function bindable(mixed $value): array
+        {
+            return match (true) {
+                $value === null                         => [null, PDO::PARAM_NULL],
+                is_bool($value)                         => [$value ? 1 : 0, PDO::PARAM_INT],
+                is_int($value)                          => [$value, PDO::PARAM_INT],
+                is_float($value)                        => [(string) $value, PDO::PARAM_STR],
+                is_string($value)                       => [$value, PDO::PARAM_STR],
+                $value instanceof \DateTimeInterface    => [$value->format('Y-m-d H:i:s'), PDO::PARAM_STR],
+                $value instanceof \BackedEnum           => self::bindable($value->value),
+                $value instanceof \Stringable           => [(string) $value, PDO::PARAM_STR],
+                default => throw new \InvalidArgumentException('Unsupported parameter type: ' . get_debug_type($value)),
+            };
+        }
+
         protected function addWhere(string $sql, array $params, string $boolean): void
         {
             $this->clauses['where'][] = [
-                'bool' => strtoupper($boolean) === 'OR' ? 'OR' : 'AND',
-                'sql' => $sql,
+                'bool'   => strtoupper($boolean) === 'OR' ? 'OR' : 'AND',
+                'sql'    => $sql,
                 'params' => $params,
             ];
         }
 
-        /**
-         * Render WHERE clauses with correct boolean connectors.
-         *
-         * @return string
-         */
         protected function renderWhere(): string
         {
             $parts = [];
