@@ -9,19 +9,16 @@
  * Uso: php lemurdb_debug_examples.php
  */
 
-require_once 'LemurDB.php';
+require_once __DIR__ . '/ceibadb.php';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONEXIÓN (Singleton)
 // ─────────────────────────────────────────────────────────────────────────────
+// SQLite in memory: the examples only build SQL, nothing is executed.
 $db = LemurDB::getInstance([
-    'driver'   => 'mysql',
-    'host'     => 'localhost',
-    'port'     => 3306,
-    'db'       => 'lemur_test',
-    'username' => 'root',
-    'password' => 'secret',
-    'prefix'   => 'app_',
+    'driver' => 'sqlite',
+    'db'     => ':memory:',
+    'prefix' => 'app_',
 ]);
 
 // ─────────────────────────────────────────────────────────────────────────────
