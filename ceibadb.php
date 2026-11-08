@@ -388,7 +388,19 @@ if (!class_exists('CeibaQuery')) {
         public function orderBy(string $column, string $direction = 'ASC'): static
         {
             $dir = strtoupper($direction) === 'DESC' ? 'DESC' : 'ASC';
-            $this->clauses['order'] = " ORDER BY {$column} {$dir}";
+            $column = trim($column);
+            // "column DESC" is accepted for backward compatibility; the embedded direction wins.
+            if (preg_match('/^(.+?)\s+(ASC|DESC)$/i', $column, $parts)) {
+                $column = $parts[1];
+                $dir = strtoupper($parts[2]);
+            }
+            // Plain identifiers (column or table.column) are quoted so reserved words such as
+            // `key` or `group` work; already quoted names and expressions are kept as given.
+            $expression = preg_match('/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/', $column)
+                ? $this->quoteIdentifier($column)
+                : $column;
+            // Successive calls add sort keys instead of replacing the previous one.
+            $this->clauses['order'] .= ($this->clauses['order'] === '' ? ' ORDER BY ' : ', ') . "{$expression} {$dir}";
             return $this;
         }
 
