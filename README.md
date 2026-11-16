@@ -125,7 +125,7 @@ Call `CeibaDB::usePdoResolver(null)` (or `resetInstances()`) to return to dedica
 
 ## Backward compatibility
 
-`LemurDB` and `LemurQuery` remain available as aliases of `CeibaDB` and `CeibaQuery`.
+`CeibaDB` and `CeibaQuery` remain available as aliases of `CeibaDB` and `CeibaQuery`.
 
 ## License
 

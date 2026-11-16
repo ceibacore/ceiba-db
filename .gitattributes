@@ -6,6 +6,6 @@
 /.ia                           export-ignore
 /.agents                       export-ignore
 /phpunit.xml                   export-ignore
-/lemurdb_debug_examples.php    export-ignore
+/ceibadb_debug_examples.php    export-ignore
 /.gitattributes                export-ignore
 /.gitignore                    export-ignore
