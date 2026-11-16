@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. The project follows [Semantic Versioning](https://semver.org/).
 
+## [2.0.0] - 2026-11-16
+
+### Removed
+- **Breaking:** the `LemurDB` and `LemurQuery` aliases and the `lemurdb.php` bridge. Use `CeibaDB` and `CeibaQuery`.
+
+### Changed
+- `lemurdb_debug_examples.php` is now `ceibadb_debug_examples.php`.
+
 ## [1.2.0] - 2026-11-08
 
 ### Added

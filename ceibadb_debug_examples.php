@@ -1,12 +1,12 @@
 <?php
 
 /**
- * LemurDB — Debug Examples (CRUD completo)
+ * CeibaDB — Debug Examples (CRUD completo)
  *
  * Inspecciona la estructura SQL y parámetros de SELECT,
  * INSERT, UPDATE y DELETE sin ejecutar contra la base de datos.
  *
- * Uso: php lemurdb_debug_examples.php
+ * Uso: php ceibadb_debug_examples.php
  */
 
 require_once __DIR__ . '/ceibadb.php';
@@ -15,7 +15,7 @@ require_once __DIR__ . '/ceibadb.php';
 // CONEXIÓN (Singleton)
 // ─────────────────────────────────────────────────────────────────────────────
 // SQLite in memory: the examples only build SQL, nothing is executed.
-$db = LemurDB::getInstance([
+$db = CeibaDB::getInstance([
     'driver' => 'sqlite',
     'db'     => ':memory:',
     'prefix' => 'app_',

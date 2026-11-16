@@ -3,13 +3,13 @@
 /**
  * CeibaDB — lightweight PDO connection manager and fluent query builder.
  *
- * Global classes (CeibaDB, CeibaQuery) with LemurDB/LemurQuery aliases for
+ * Global classes (CeibaDB, CeibaQuery) with CeibaDB/CeibaQuery aliases for
  * backward compatibility. See CHANGELOG.md for the version history.
  */
 if (!class_exists('CeibaDB')) {
     class CeibaDB
     {
-        public const VERSION = '1.2.0';
+        public const VERSION = '2.0.0';
 
         /** Accepted driver names => PDO driver. */
         private const DRIVERS = [
@@ -84,7 +84,7 @@ if (!class_exists('CeibaDB')) {
                 $this->pdo = new PDO($dsn, $config['username'] ?? '', $config['password'] ?? '', $options);
             } catch (PDOException $e) {
                 $base = "Connection Error: " . $e->getMessage();
-                $debugEnabled = filter_var((string) (getenv('CEIBADB_DEBUG') ?: getenv('LEMURDB_DEBUG') ?: '0'), FILTER_VALIDATE_BOOLEAN);
+                $debugEnabled = filter_var((string) (getenv('CEIBADB_DEBUG') ?: getenv('CEIBADB_DEBUG') ?: '0'), FILTER_VALIDATE_BOOLEAN);
 
                 if ($debugEnabled) {
                     $debugInfo = self::buildDebugInfo(self::redactConfig($config), $dsn);
@@ -1019,12 +1019,4 @@ if (!class_exists('CeibaQuery')) {
             return implode('', $parts);
         }
     }
-}
-
-// ── Backward Compatibility Aliases ─────────────────────────────────────────
-if (!class_exists('LemurDB', false)) {
-    class_alias('CeibaDB', 'LemurDB');
-}
-if (!class_exists('LemurQuery', false)) {
-    class_alias('CeibaQuery', 'LemurQuery');
 }

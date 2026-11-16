@@ -5,8 +5,6 @@ namespace CeibaDB\Tests;
 use PHPUnit\Framework\TestCase;
 use CeibaDB;
 use CeibaQuery;
-use LemurDB;
-use LemurQuery;
 use PDO;
 
 class CeibaDbTest extends TestCase
@@ -36,14 +34,12 @@ class CeibaDbTest extends TestCase
         CeibaDB::resetInstances();
     }
 
-    public function test_singleton_and_aliases(): void
+    public function test_singleton(): void
     {
         $this->assertInstanceOf(CeibaDB::class, $this->db);
         $this->assertTrue(class_exists('CeibaDB'));
         $this->assertTrue(class_exists('CeibaQuery'));
-        $this->assertTrue(class_exists('LemurDB'));
-        $this->assertTrue(class_exists('LemurQuery'));
-        $this->assertSame(CeibaDB::getInstance(), LemurDB::getInstance());
+        $this->assertSame(CeibaDB::getInstance(), CeibaDB::getInstance());
     }
 
     public function test_insert_and_get(): void
@@ -87,11 +83,5 @@ class CeibaDbTest extends TestCase
         $this->pdo->exec("INSERT INTO settings (`group`, `key`) VALUES ('b', 'x'), ('a', 'z'), ('a', 'y')");
         $rows = $this->db->query('settings')->orderBy('group')->orderBy('key')->get();
         $this->assertSame([['a', 'y'], ['a', 'z'], ['b', 'x']], array_map(fn ($r) => [$r['group'], $r['key']], $rows));
-    }
-
-    public function test_backward_compatibility_lemurdb(): void
-    {
-        $rows = LemurDB::getInstance()->query('users')->get();
-        $this->assertIsArray($rows);
     }
 }
